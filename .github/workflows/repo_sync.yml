@@ -1,0 +1,23 @@
+name: RepoSync
+
+on:
+  schedule:
+    - cron: "3 3 * * *"   # UTC
+  workflow_dispatch:       # Allow manual trigger from UI
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout _manage repository
+        uses: actions/checkout@v4
+        with:
+          repository: phan2410/_manage
+          token: ${{ secrets.__RepoSync }}
+
+      - name: Synchronize repositories
+        working-directory: ./scripts
+        run: |
+          chmod +x sync-repos.sh
+          ./sync-repos.sh

@@ -16,6 +16,11 @@ jobs:
           repository: phan2410/_manage
           token: ${{ secrets.__RepoSync }}
 
+      - name: Configure Git credentials
+        run: |
+          git config --global credential.helper cache
+          printf "protocol=https\nhost=github.com\nusername=x-access-token\npassword=${{ secrets.__RepoSync }}\n\n" | git credential approve
+
       - name: Synchronize repositories
         working-directory: ./scripts
         run: |

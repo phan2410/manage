@@ -1,30 +1,38 @@
-name: RepoSync
+name: repo-sync
 
 on:
   schedule:
-    - cron: "3 3 * * *"   # UTC
+    - cron: "0 0 * * *"   # UTC
   workflow_dispatch:       # Allow manual trigger from UI
 
 jobs:
-  run-script:
+  _1:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout _manage repository
+      - &checkout_manage_repo
+        name: Checkout _manage repository
         uses: actions/checkout@v4
         with:
           repository: phan2410/_manage
-          token: ${{ secrets.__RepoSync }}
+          token: ${{ secrets._2_1 }}
 
-      - name: Configure Git credentials
-        run: |
-          git config --global credential.helper cache
-          printf "protocol=https\nhost=github.com\nusername=x-access-token\npassword=${{ secrets.__RepoSync }}\n\n" | git credential approve
-
-      - name: Synchronize repositories
-        working-directory: ./scripts
+      - name: Main
+        working-directory: ./github/${{ github.workflow }}
         env:
-          GIT_LFS_SKIP_SMUDGE: 1
-        run: |
-          chmod +x sync-repos.sh
-          ./sync-repos.sh
+          _1_1: ${{ secrets._1_1 }}
+        run: ./${{ github.job }}.sh
+  _2:
+    needs:
+      - _1
+    runs-on: ubuntu-latest
+
+    steps:
+      - *checkout_manage_repo
+      - name: Main
+        working-directory: ./github/${{ github.workflow }}
+        env:
+          _2_1: ${{ secrets._2_1 }}
+          _2_2: ${{ secrets._2_2 }}
+          _2_3: ${{ secrets._2_3 }}
+        run: ./${{ github.job }}.sh

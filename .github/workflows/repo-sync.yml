@@ -12,7 +12,7 @@ jobs:
     steps:
       - &checkout_manage_repo
         name: Checkout _manage repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: phan2410/_manage
           token: ${{ secrets._2_1 }}

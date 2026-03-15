@@ -20,6 +20,7 @@ jobs:
       - name: Main
         working-directory: ./github/${{ github.workflow }}
         env:
+          _l_0: ${{ secrets._l_0 }}
           _1_1: ${{ secrets._1_1 }}
         run: ./${{ github.job }}.sh
   _2:
@@ -32,6 +33,7 @@ jobs:
       - name: Main
         working-directory: ./github/${{ github.workflow }}
         env:
+          _l_0: ${{ secrets._l_0 }}
           _2_1: ${{ secrets._2_1 }}
           _2_2: ${{ secrets._2_2 }}
           _2_3: ${{ secrets._2_3 }}

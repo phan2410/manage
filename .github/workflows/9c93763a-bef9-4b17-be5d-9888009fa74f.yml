@@ -6,7 +6,19 @@ on:
   workflow_dispatch:       # Allow manual trigger from UI
 
 jobs:
+  init:
+    runs-on: ubuntu-latest
+    outputs:
+      start_ts: ${{ steps.ts.outputs.start_ts }}
+
+    steps:
+      - id: ts
+        shell: bash
+        run: echo "start_ts=$(date +%s%3N)" >> "$GITHUB_OUTPUT"
+
   _1:
+    needs:
+      - init
     runs-on: ubuntu-latest
 
     steps:
@@ -20,11 +32,13 @@ jobs:
       - name: Main
         working-directory: ./github/${{ github.workflow }}
         env:
+          GH_WORKFLOW_START_TS: ${{ needs.init.outputs.start_ts }}
           _l_0: ${{ secrets._l_0 }}
           _1_1: ${{ secrets._1_1 }}
         run: ./${{ github.job }}.sh
   _2:
     needs:
+      - init
       - _1
     runs-on: ubuntu-latest
 
@@ -33,6 +47,7 @@ jobs:
       - name: Main
         working-directory: ./github/${{ github.workflow }}
         env:
+          GH_WORKFLOW_START_TS: ${{ needs.init.outputs.start_ts }}
           _l_0: ${{ secrets._l_0 }}
           _2_1: ${{ secrets._2_1 }}
           _2_2: ${{ secrets._2_2 }}

@@ -1,0 +1,44 @@
+name: d28ee12e-397f-4099-a30d-aed408550f30
+
+on:
+  workflow_dispatch:
+    inputs:
+      data:
+        description: 'Input Data'
+        required: true
+        type: string
+
+jobs:
+  init:
+    runs-on: ubuntu-latest
+    outputs:
+      start_ts: ${{ steps.ts.outputs.start_ts }}
+
+    steps:
+      - id: ts
+        shell: bash
+        run: echo "start_ts=$(date +%s%3N)" >> "$GITHUB_OUTPUT"
+
+  _1:
+    needs:
+      - init
+    runs-on: ubuntu-latest
+
+    steps:
+      - &checkout_manage_repo
+        name: Checkout _manage repository
+        uses: actions/checkout@v6
+        with:
+          repository: phan2410/_manage
+          token: ${{ secrets._2_1 }}
+
+      - name: Main
+        working-directory: ./github/${{ github.workflow }}
+        env:
+          GH_WORKFLOW_START_TS: ${{ needs.init.outputs.start_ts }}
+          _l_0: ${{ secrets._l_0 }}
+          _1_1: ${{ secrets.D28EE12E397F4099A30DAED408550F30_1_1 }}
+          _1_2: ${{ secrets.D28EE12E397F4099A30DAED408550F30_1_2 }}
+          _1_3: ${{ secrets.D28EE12E397F4099A30DAED408550F30_1_3 }}
+          _1_data: ${{ github.event.inputs.data }}
+        run: ./${{ github.job }}.sh

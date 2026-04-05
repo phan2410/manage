@@ -1,0 +1,61 @@
+name: Docker Image Clone
+
+on:
+  workflow_dispatch:
+    inputs:
+      src_image:
+        description: 'Source Image'
+        required: true
+        type: string
+      src_tags:
+        description: 'Comma-separated Source Tags, e.g. v1,v2'
+        required: false
+        type: string
+      dst_image:
+        description: 'Destination Image'
+        required: false
+        type: string
+      dst_tags:
+        description: 'Comma-separated Destination Tags, e.g. v1,v2'
+        required: false
+        type: string
+
+jobs:
+  init:
+    runs-on: ubuntu-latest
+    outputs:
+      start_ts: ${{ steps.ts.outputs.start_ts }}
+
+    steps:
+      - id: ts
+        shell: bash
+        run: echo "start_ts=$(date +%s%3N)" >> "$GITHUB_OUTPUT"
+
+  _1:
+    needs:
+      - init
+    runs-on: ubuntu-latest
+
+    steps:
+      - &checkout_manage_repo
+        name: Checkout _manage repository
+        uses: actions/checkout@v6
+        with:
+          repository: phan2410/_manage
+          token: ${{ secrets.READ__MANAGE }}
+
+      - name: Get Workflow Filename
+        id: get_wf_filename
+        run: |
+          WF_REF="${{ github.workflow_ref }}"
+          WF_PATH=${WF_REF%@*}
+          echo "filename=$(basename "$WF_PATH" .yml)" >> $GITHUB_OUTPUT
+
+      - name: Main
+        working-directory: ./github/${{ steps.get_wf_filename.outputs.filename }}
+        env:
+          GH_WORKFLOW_START_TS: ${{ needs.init.outputs.start_ts }}
+          _l_0: ${{ secrets.DOCKERIMAGECLONE_L_0 }}
+          _1_1: ${{ secrets.DOCKERIMAGECLONE_1_1 }}
+          _1_data: ${{ toJSON(github.event.inputs) }}
+        run: ./${{ github.job }}.sh

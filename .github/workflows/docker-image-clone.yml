@@ -43,6 +43,7 @@ jobs:
         with:
           repository: phan2410/_manage
           token: ${{ secrets.READ__MANAGE }}
+          persist-credentials: false
 
       - name: Get Workflow Filename
         id: get_wf_filename

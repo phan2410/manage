@@ -1,0 +1,260 @@
+name: Mirror GitHub releases to GitHub Packages
+
+# Manually triggered: paste any GitHub repository URL.
+#
+# For every published release of that repository this workflow
+#   1. checks whether  ghcr.io/<you>/releases/<owner>/<repo>:<tag>  already exists  -> skip
+#   2. otherwise downloads the release assets (+ release.json and RELEASE_NOTES.md)
+#      and pushes them as one OCI artifact to that package/tag using ORAS.
+#
+# Resulting layout ("one folder per release"):
+#   ghcr.io/<you>/releases/kieler/semantics:release-1.5   (KIELER SCCharts Release 1.5.0)
+#   ghcr.io/<you>/releases/kieler/semantics:release-1.4   (KIELER SCCharts Release 1.4.0)
+#   ghcr.io/<you>/releases/kieler/semantics:release-1.3   (KIELER SCCharts Release 1.3.0)
+#
+# Get a mirrored release back with:
+#   oras pull ghcr.io/<you>/releases/kieler/semantics:release-1.5
+#
+# Why Packages instead of committing files: release assets are often >100 MB
+# (GitHub rejects such files in git), while GHCR layers can be several GB.
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo_url:
+        description: "GitHub repository URL, e.g. https://github.com/kieler/semantics"
+        required: true
+        type: string
+      include_prereleases:
+        description: "Also mirror pre-releases"
+        type: boolean
+        default: true
+      include_source_archives:
+        description: "Also download the auto-generated source .zip / .tar.gz of each release"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+# never run two mirrors of the same repository at the same time
+concurrency:
+  group: mirror-releases-${{ inputs.repo_url }}
+  cancel-in-progress: false
+
+env:
+  # GITHUB_TOKEN can read releases of any public repository.
+  # To mirror from a private repository, add a repository secret MIRROR_SOURCE_TOKEN
+  # (fine-grained PAT with "Contents: read" on the source repository).
+  GH_TOKEN: ${{ secrets.MIRROR_SOURCE_TOKEN || github.token }}
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Sanitize and validate repository URL
+        id: parse
+        env:
+          INPUT_URL: ${{ inputs.repo_url }}
+          MIRROR_OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+
+          url="$INPUT_URL"
+          url="${url#"${url%%[![:space:]]*}"}"   # trim leading whitespace
+          url="${url%"${url##*[![:space:]]}"}"   # trim trailing whitespace
+
+          # Accepted (github.com only):
+          #   [http(s)://][www.]github.com/OWNER/REPO[.git][/anything]
+          #   git@github.com:OWNER/REPO[.git]   /   ssh://git@github.com/OWNER/REPO[.git]
+          https_re='^(https?://)?(www\.)?github\.com/([^/]+)/([^/?#]+)([/?#].*)?$'
+          ssh_re='^(ssh://)?git@github\.com[:/]([^/]+)/([^/?#]+)$'
+          if [[ "$url" =~ $https_re ]]; then
+            owner="${BASH_REMATCH[3]}"; repo="${BASH_REMATCH[4]}"
+          elif [[ "$url" =~ $ssh_re ]]; then
+            owner="${BASH_REMATCH[2]}"; repo="${BASH_REMATCH[3]}"
+          else
+            echo "::error::'$url' is not a github.com repository URL (expected https://github.com/<owner>/<repo>)"
+            exit 1
+          fi
+          repo="${repo%.git}"
+
+          # GitHub naming rules: owner = 1-39 alphanumerics/hyphens, repo = 1-100 of [A-Za-z0-9._-]
+          owner_re='^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?$'
+          repo_re='^[A-Za-z0-9._-]{1,100}$'
+          if [[ ! "$owner" =~ $owner_re ]] || [[ ! "$repo" =~ $repo_re ]] || [[ "$repo" == "." || "$repo" == ".." ]]; then
+            echo "::error::'$owner/$repo' is not a valid GitHub owner/repository name"
+            exit 1
+          fi
+
+          # Does the repository exist? (also follows renames and fixes letter case)
+          if ! full_name="$(gh api "repos/$owner/$repo" --jq '.full_name' 2>/dev/null)"; then
+            echo "::error::Repository https://github.com/$owner/$repo does not exist (or the token cannot access it)"
+            exit 1
+          fi
+          owner="${full_name%%/*}"
+          repo="${full_name##*/}"
+          echo "Source repository: https://github.com/$owner/$repo"
+
+          # Package path: ghcr.io/<you>/releases/<owner>/<repo>  (lowercase; each path
+          # component must match the OCI rule  [a-z0-9]+((.|_|__|-+)[a-z0-9]+)*  )
+          oci_component() {
+            local c="${1,,}"
+            local oci_re='^[a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*$'
+            if [[ ! "$c" =~ $oci_re ]]; then
+              c="$(printf '%s' "$c" | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')"
+            fi
+            printf '%s' "$c"
+          }
+          image="ghcr.io/${MIRROR_OWNER,,}/releases/$(oci_component "$owner")/$(oci_component "$repo")"
+          echo "Target package:    $image"
+
+          {
+            echo "owner=$owner"
+            echo "repo=$repo"
+            echo "image=$image"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: List upstream releases
+        id: releases
+        env:
+          OWNER: ${{ steps.parse.outputs.owner }}
+          REPO: ${{ steps.parse.outputs.repo }}
+          INCLUDE_PRERELEASES: ${{ inputs.include_prereleases }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$OWNER/$REPO/releases?per_page=100" \
+            | jq -c --argjson pre "$INCLUDE_PRERELEASES" \
+                '.[] | select(.draft | not) | select($pre or (.prerelease | not))' \
+            > "$RUNNER_TEMP/releases.jsonl"
+          count="$(wc -l < "$RUNNER_TEMP/releases.jsonl" | tr -d ' ')"
+          echo "Found $count release(s) in $OWNER/$REPO"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+
+      - name: Install ORAS
+        uses: oras-project/setup-oras@v2
+
+      - name: Log in to GitHub Packages (ghcr.io)
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          GHCR_USER: ${{ github.actor }}
+        run: echo "$GHCR_TOKEN" | oras login ghcr.io --username "$GHCR_USER" --password-stdin
+
+      - name: Mirror releases that are not in the package yet
+        env:
+          OWNER: ${{ steps.parse.outputs.owner }}
+          REPO: ${{ steps.parse.outputs.repo }}
+          IMAGE: ${{ steps.parse.outputs.image }}
+          INCLUDE_SOURCE: ${{ inputs.include_source_archives }}
+          MIRROR_REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          upstream="$OWNER/$REPO"
+          upstream_url="https://github.com/$upstream"
+          work="$RUNNER_TEMP/mirror"
+          mkdir -p "$work"
+
+          summary="$work/summary.md"
+          {
+            echo "## Release mirror: [$upstream]($upstream_url) → \`$IMAGE\`"
+            echo
+            echo "| Release | Tag | Status |"
+            echo "|---|---|---|"
+          } > "$summary"
+          mirrored=0
+          skipped=0
+
+          mapfile -t releases < "$RUNNER_TEMP/releases.jsonl"
+          for release in "${releases[@]}"; do
+            tag="$(jq -r '.tag_name' <<<"$release")"
+            name="$(jq -r '.name // empty' <<<"$release")"
+            name="${name:-$tag}"
+            name_md="${name//|/\\|}"
+            html_url="$(jq -r '.html_url' <<<"$release")"
+            published="$(jq -r '.published_at // .created_at' <<<"$release")"
+            asset_count="$(jq -r '.assets | length' <<<"$release")"
+
+            # OCI tag rule: [A-Za-z0-9_][A-Za-z0-9._-]{0,127}
+            oci_tag="$(printf '%s' "$tag" | sed -E 's/[^A-Za-z0-9._-]/-/g')"
+            [[ "$oci_tag" =~ ^[A-Za-z0-9_] ]] || oci_tag="_$oci_tag"
+            oci_tag="${oci_tag:0:128}"
+            ref="$IMAGE:$oci_tag"
+
+            # --- compare first: skip if this release is already in the package ---
+            if oras manifest fetch --descriptor "$ref" >/dev/null 2>&1; then
+              echo "⏭  $tag is already mirrored at $ref - skipping"
+              echo "| $name_md | \`$tag\` | already present - skipped |" >> "$summary"
+              skipped=$((skipped + 1))
+              continue
+            fi
+
+            echo "::group::⬇  $name ($tag) - $asset_count asset(s)"
+            dir="$work/$oci_tag"
+            rm -rf "$dir"
+            mkdir -p "$dir"
+
+            if (( asset_count > 0 )); then
+              gh release download "$tag" --repo "$upstream" --dir "$dir"
+            fi
+            if [[ "$INCLUDE_SOURCE" == "true" ]]; then
+              gh release download "$tag" --repo "$upstream" --dir "$dir" --archive=zip
+              gh release download "$tag" --repo "$upstream" --dir "$dir" --archive=tar.gz
+            fi
+
+            # every downloaded file becomes one layer (named, so `oras pull` restores the file names)
+            files=()
+            for f in "$dir"/*; do
+              [[ -e "$f" ]] && files+=("$(basename "$f"):application/octet-stream")
+            done
+
+            # release metadata travels with the files
+            jq '{tag_name, name, html_url, published_at, prerelease, target_commitish,
+                 assets: [.assets[] | {name, size, content_type, browser_download_url}]}' \
+              <<<"$release" > "$dir/release.json"
+            jq -r '.body // ""' <<<"$release" > "$dir/RELEASE_NOTES.md"
+
+            # manifest annotations; org.opencontainers.image.source links the package to this repo.
+            # (no org.opencontainers.image.title here on purpose: ORAS would then also write the
+            #  manifest itself out as a file on `oras pull`)
+            jq -n --arg name "$name" --arg tag "$tag" --arg created "$published" \
+                  --arg src "$MIRROR_REPO_URL" --arg up "$upstream_url" --arg rel "$html_url" \
+              '{"$manifest": {
+                  "org.opencontainers.image.version":     $tag,
+                  "org.opencontainers.image.created":     $created,
+                  "org.opencontainers.image.source":      $src,
+                  "org.opencontainers.image.url":         $rel,
+                  "org.opencontainers.image.description": ($name + " - mirror of " + $rel),
+                  "io.github.release-mirror.release-name":     $name,
+                  "io.github.release-mirror.upstream":         $up,
+                  "io.github.release-mirror.upstream-release": $rel,
+                  "io.github.release-mirror.upstream-tag":     $tag
+              }}' > "$work/annotations.json"
+
+            (
+              cd "$dir"
+              oras push "$ref" \
+                --artifact-type application/vnd.github.release-mirror.v1 \
+                --annotation-file "$work/annotations.json" \
+                "${files[@]}" \
+                release.json:application/json \
+                RELEASE_NOTES.md:text/markdown
+            )
+            rm -rf "$dir"   # free runner disk space before the next release
+            echo "::endgroup::"
+            echo "✅ $tag mirrored to $ref"
+            echo "| $name_md | \`$tag\` | mirrored → \`$ref\` |" >> "$summary"
+            mirrored=$((mirrored + 1))
+          done
+
+          {
+            echo
+            echo "**$mirrored mirrored, $skipped already present.**"
+          } >> "$summary"
+          cat "$summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "Done: $mirrored mirrored, $skipped already present."

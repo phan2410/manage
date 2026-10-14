@@ -30,7 +30,7 @@ on:
         type: boolean
         default: true
       include_source_archives:
-        description: "Also download the auto-generated source .zip / .tar.gz of each release"
+        description: "Also download the auto-generated source .zip / .tar.gz of each release (stored as source-<tag>.zip / source-<tag>.tar.gz)"
         type: boolean
         default: false
 
@@ -203,8 +203,12 @@ jobs:
               gh release download "$tag" --repo "$upstream" --dir "$dir"
             fi
             if [[ "$INCLUDE_SOURCE" == "true" ]]; then
-              gh release download "$tag" --repo "$upstream" --dir "$dir" --archive=zip
-              gh release download "$tag" --repo "$upstream" --dir "$dir" --archive=tar.gz
+              # Not `gh release download --archive`: that requests zipball/<tag>, which GitHub answers
+              # with HTTP 300 when a branch and a tag share the same name (kieler/semantics has both a
+              # branch and a tag called release-1.5). refs/tags/<tag> is unambiguous, and `gh api`
+              # follows the redirect to codeload.github.com.
+              gh api "repos/$upstream/zipball/refs/tags/$tag" > "$dir/source-$oci_tag.zip"
+              gh api "repos/$upstream/tarball/refs/tags/$tag" > "$dir/source-$oci_tag.tar.gz"
             fi
 
             # every downloaded file becomes one layer (named, so `oras pull` restores the file names)

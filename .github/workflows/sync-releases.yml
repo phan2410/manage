@@ -8,7 +8,7 @@ name: Sync releases from a public GitHub repository
 #   target_repo  -> the same name as the source repository (created as a public repo if missing)
 #   tag_name     -> the latest release of the source ("all" copies every published release, oldest first)
 #
-# Token: add the repository secret SYNC_RELEASE_PAT whenever the target is not this
+# Token: add the repository secret SYNC_RELEASE_PAT (_1_1) whenever the target is not this
 # repository - a classic PAT with the "repo" scope, or a fine-grained PAT with
 # "Contents: read and write" on the target repository (plus the right to create
 # repositories if you rely on the automatic creation). Without the secret the workflow
@@ -56,7 +56,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  GH_TOKEN: ${{ secrets.SYNC_RELEASE_PAT || github.token }}
+  GH_TOKEN: ${{ secrets._1_1 || github.token }}
 
 jobs:
   resolve:
@@ -78,7 +78,7 @@ jobs:
           INPUT_TAG: ${{ inputs.tag_name }}
           THIS_REPO: ${{ github.repository }}
           THIS_OWNER: ${{ github.repository_owner }}
-          HAVE_PAT: ${{ secrets.SYNC_RELEASE_PAT != '' }}
+          HAVE_PAT: ${{ secrets._1_1 != '' }}
         run: |
           set -euo pipefail
           trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; printf '%s' "${s%"${s##*[![:space:]]}"}"; }

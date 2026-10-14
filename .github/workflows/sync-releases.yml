@@ -5,7 +5,7 @@ name: Sync releases from a public GitHub repository
 # Copies releases of that repository - tag, title, notes, pre-release flag and every
 # uploaded asset - into a repository of yours, using only the GitHub CLI. Defaults:
 #   target_owner -> the owner of this repository
-#   target_repo  -> the same name as the source repository (created as a public repo if missing)
+#   target_repo  -> releases_<source owner>_<source repo>, e.g. releases_kieler_semantics (created as a public repo if missing)
 #   tag_name     -> the latest release of the source ("all" copies every published release, oldest first)
 #
 # Token: add the repository secret SYNC_RELEASE_PAT whenever the target is not this
@@ -34,7 +34,7 @@ on:
         type: string
         default: ""
       target_repo:
-        description: "Target repository (default: same name as the source repository; created if it does not exist)"
+        description: "Target repository (default: releases_<source_owner>_<source_repo>; created if it does not exist)"
         required: false
         type: string
         default: ""
@@ -113,12 +113,13 @@ jobs:
           src_repo="${source##*/}"
           echo "Source: https://github.com/$source"
 
-          # ---- target: defaults to <this owner>/<source repo name> -----------------------
+          # ---- target: defaults to <this owner>/releases_<source owner>_<source repo> ------
+          src_owner="${source%%/*}"
           target_owner="$(trim "$INPUT_TARGET_OWNER")"; target_owner="${target_owner:-$THIS_OWNER}"
-          target_repo="$(trim "$INPUT_TARGET_REPO")";   target_repo="${target_repo:-$src_repo}"
+          target_repo="$(trim "$INPUT_TARGET_REPO")";   target_repo="${target_repo:-releases_${src_owner}_${src_repo}}"
           target_repo="${target_repo%.git}"
           if [[ ! "$target_owner" =~ $owner_re ]] || [[ ! "$target_repo" =~ $repo_re ]]; then
-            echo "::error::'$target_owner/$target_repo' is not a valid GitHub owner/repository name"
+            echo "::error::'$target_owner/$target_repo' is not a valid GitHub owner/repository name (names are at most 100 characters; give target_repo explicitly)"
             exit 1
           fi
           target="$target_owner/$target_repo"

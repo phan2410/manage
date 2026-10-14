@@ -1,0 +1,254 @@
+name: Sync releases from a public GitHub repository
+
+# Manually triggered: paste the URL of any public GitHub repository.
+#
+# Copies releases of that repository - tag, title, notes, pre-release flag and every
+# uploaded asset - into a repository of yours, using only the GitHub CLI. Defaults:
+#   target_owner -> the owner of this repository
+#   target_repo  -> the same name as the source repository (created as a public repo if missing)
+#   tag_name     -> the latest release of the source ("all" copies every published release, oldest first)
+#
+# Token: add the repository secret SYNC_RELEASE_PAT whenever the target is not this
+# repository - a classic PAT with the "repo" scope, or a fine-grained PAT with
+# "Contents: read and write" on the target repository (plus the right to create
+# repositories if you rely on the automatic creation). Without the secret the workflow
+# uses GITHUB_TOKEN, which can only write releases into this repository.
+#
+# Behaviour:
+#   - releases that already exist in the target are skipped, so re-run any time to pick up new ones
+#   - a copy that failed half-way is left as a draft and redone on the next run
+#   - the git tag created in the target points at the target's default branch: the release
+#     FILES are mirrored, not the source code. GitHub's auto-generated "Source code (zip/tar.gz)"
+#     of the target is therefore empty; set include_source_archives to copy the real ones as assets.
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo_url:
+        description: "Source repository URL, e.g. https://github.com/kieler/semantics"
+        required: true
+        type: string
+      target_owner:
+        description: "Target owner (default: the owner of this repository)"
+        required: false
+        type: string
+        default: ""
+      target_repo:
+        description: "Target repository (default: same name as the source repository; created if it does not exist)"
+        required: false
+        type: string
+        default: ""
+      tag_name:
+        description: "Release tag to copy (default: latest release of the source; 'all' = every published release)"
+        required: false
+        type: string
+        default: ""
+      include_source_archives:
+        description: "Also copy the source .zip / .tar.gz of each release as assets"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # only needed when the target is this repository (GITHUB_TOKEN fallback)
+
+concurrency:
+  group: sync-releases-${{ inputs.repo_url }}-${{ inputs.target_owner }}-${{ inputs.target_repo }}
+  cancel-in-progress: false
+
+env:
+  GH_TOKEN: ${{ secrets.SYNC_RELEASE_PAT || github.token }}
+
+jobs:
+  resolve:
+    name: Resolve source, target and tags
+    runs-on: ubuntu-latest
+    outputs:
+      source: ${{ steps.plan.outputs.source }}
+      target: ${{ steps.plan.outputs.target }}
+      tags: ${{ steps.plan.outputs.tags }}
+      count: ${{ steps.plan.outputs.count }}
+    steps:
+      - name: Resolve source, target and tags
+        id: plan
+        shell: bash
+        env:
+          INPUT_URL: ${{ inputs.repo_url }}
+          INPUT_TARGET_OWNER: ${{ inputs.target_owner }}
+          INPUT_TARGET_REPO: ${{ inputs.target_repo }}
+          INPUT_TAG: ${{ inputs.tag_name }}
+          THIS_REPO: ${{ github.repository }}
+          THIS_OWNER: ${{ github.repository_owner }}
+          HAVE_PAT: ${{ secrets.SYNC_RELEASE_PAT != '' }}
+        run: |
+          set -euo pipefail
+          trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; printf '%s' "${s%"${s##*[![:space:]]}"}"; }
+
+          # ---- source: owner/repo from the URL ------------------------------------------
+          #   [http(s)://][www.]github.com/OWNER/REPO[.git][/anything]
+          #   git@github.com:OWNER/REPO[.git]   /   ssh://git@github.com/OWNER/REPO[.git]
+          url="$(trim "$INPUT_URL")"
+          https_re='^(https?://)?(www\.)?github\.com/([^/]+)/([^/?#]+)([/?#].*)?$'
+          ssh_re='^(ssh://)?git@github\.com[:/]([^/]+)/([^/?#]+)$'
+          if [[ "$url" =~ $https_re ]]; then
+            owner="${BASH_REMATCH[3]}"; repo="${BASH_REMATCH[4]}"
+          elif [[ "$url" =~ $ssh_re ]]; then
+            owner="${BASH_REMATCH[2]}"; repo="${BASH_REMATCH[3]}"
+          else
+            echo "::error::'$url' is not a github.com repository URL (expected https://github.com/<owner>/<repo>)"
+            exit 1
+          fi
+          repo="${repo%.git}"
+
+          owner_re='^[A-Za-z0-9]([A-Za-z0-9-]{0,37}[A-Za-z0-9])?$'
+          repo_re='^[A-Za-z0-9._-]{1,100}$'
+          if [[ ! "$owner" =~ $owner_re ]] || [[ ! "$repo" =~ $repo_re ]] || [[ "$repo" == "." || "$repo" == ".." ]]; then
+            echo "::error::'$owner/$repo' is not a valid GitHub owner/repository name"
+            exit 1
+          fi
+          # exists? (also follows renames and fixes letter case)
+          if ! source="$(gh api "repos/$owner/$repo" --jq '.full_name' 2>/dev/null)"; then
+            echo "::error::Repository https://github.com/$owner/$repo does not exist (or the token cannot access it)"
+            exit 1
+          fi
+          src_repo="${source##*/}"
+          echo "Source: https://github.com/$source"
+
+          # ---- target: defaults to <this owner>/<source repo name> -----------------------
+          target_owner="$(trim "$INPUT_TARGET_OWNER")"; target_owner="${target_owner:-$THIS_OWNER}"
+          target_repo="$(trim "$INPUT_TARGET_REPO")";   target_repo="${target_repo:-$src_repo}"
+          target_repo="${target_repo%.git}"
+          if [[ ! "$target_owner" =~ $owner_re ]] || [[ ! "$target_repo" =~ $repo_re ]]; then
+            echo "::error::'$target_owner/$target_repo' is not a valid GitHub owner/repository name"
+            exit 1
+          fi
+          target="$target_owner/$target_repo"
+          if [[ "${target,,}" == "${source,,}" ]]; then
+            echo "::error::Target and source are the same repository ($source); give target_owner or target_repo"
+            exit 1
+          fi
+          if [[ "${target,,}" != "${THIS_REPO,,}" && "$HAVE_PAT" != "true" ]]; then
+            echo "::error::Target $target is not this repository, so GITHUB_TOKEN cannot write to it. Add the repository secret SYNC_RELEASE_PAT (a PAT that can write releases in $target)."
+            exit 1
+          fi
+          echo "Target: https://github.com/$target"
+
+          # ---- tags ------------------------------------------------------------------
+          tag="$(trim "$INPUT_TAG")"
+          if [[ -z "$tag" ]]; then
+            # "latest" = newest non-draft, non-pre-release; fall back to the newest published release
+            tag="$(gh api "repos/$source/releases/latest" --jq '.tag_name' 2>/dev/null || true)"
+            if [[ -z "$tag" ]]; then
+              tag="$(gh api "repos/$source/releases?per_page=20" --jq '[.[] | select(.draft | not)][0].tag_name // empty')"
+            fi
+            if [[ -z "$tag" ]]; then
+              echo "::error::https://github.com/$source has no published releases"
+              exit 1
+            fi
+            tags="$(jq -cn --arg t "$tag" '[$t]')"
+          elif [[ "$tag" == "all" ]]; then
+            tags="$(gh api --paginate "repos/$source/releases?per_page=100" \
+                    | jq -cs '[.[][] | select(.draft | not) | .tag_name] | reverse')"
+          else
+            if ! gh api "repos/$source/releases/tags/$tag" --jq '.tag_name' >/dev/null 2>&1; then
+              echo "::error::https://github.com/$source has no release with tag '$tag'. Available releases:"
+              gh release list --repo "$source" --limit 50 || true
+              exit 1
+            fi
+            tags="$(jq -cn --arg t "$tag" '[$t]')"
+          fi
+          count="$(jq 'length' <<<"$tags")"
+          if (( count > 256 )); then
+            echo "::error::$count releases, but one run can copy at most 256 (GitHub matrix limit). Copy the rest by tag."
+            exit 1
+          fi
+          echo "Releases to copy ($count): $(jq -r 'join(", ")' <<<"$tags")"
+
+          # ---- target repository: create it when missing --------------------------------
+          if gh api "repos/$target" --jq '.full_name' >/dev/null 2>&1; then
+            echo "Target repository exists"
+          else
+            echo "Creating https://github.com/$target"
+            gh repo create "$target" --public --add-readme --description "Releases of https://github.com/$source"
+            for _ in {1..10}; do   # releases need a commit to hang their tag on; wait for the README commit
+              if gh api "repos/$target/commits?per_page=1" --jq '.[0].sha' >/dev/null 2>&1; then break; fi
+              sleep 3
+            done
+          fi
+
+          {
+            echo "source=$source"
+            echo "target=$target"
+            echo "tags=$tags"
+            echo "count=$count"
+          } >> "$GITHUB_OUTPUT"
+
+  sync:
+    name: ${{ matrix.tag }}
+    needs: resolve
+    if: needs.resolve.outputs.count != '0'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 1      # oldest first, so the newest release ends up as "Latest" in the target
+      matrix:
+        tag: ${{ fromJson(needs.resolve.outputs.tags) }}
+    steps:
+      - name: Copy release
+        shell: bash
+        env:
+          SOURCE: ${{ needs.resolve.outputs.source }}
+          TARGET: ${{ needs.resolve.outputs.target }}
+          TAG: ${{ matrix.tag }}
+          INCLUDE_SOURCE: ${{ inputs.include_source_archives }}
+        run: |
+          set -euo pipefail
+          src_url="https://github.com/$SOURCE/releases/tag/$TAG"
+          dst_url="https://github.com/$TARGET/releases/tag/$TAG"
+
+          # already copied? (a leftover draft means an earlier run died half-way: redo it)
+          if is_draft="$(gh release view "$TAG" --repo "$TARGET" --json isDraft --jq '.isDraft' 2>/dev/null)"; then
+            if [[ "$is_draft" == "false" ]]; then
+              echo "⏭  $TAG already exists in $TARGET - skipping ($dst_url)"
+              echo "⏭ \`$TAG\` already present in $TARGET - skipped" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            echo "Deleting unfinished draft of $TAG in $TARGET"
+            gh release delete "$TAG" --repo "$TARGET" --yes
+          fi
+
+          release="$(gh api "repos/$SOURCE/releases/tags/$TAG")"
+          title="$(jq -r '.name // empty' <<<"$release")"; title="${title:-$TAG}"
+          prerelease="$(jq -r '.prerelease' <<<"$release")"
+          asset_count="$(jq -r '.assets | length' <<<"$release")"
+
+          dir="$RUNNER_TEMP/assets"
+          mkdir -p "$dir"
+          if (( asset_count > 0 )); then
+            gh release download "$TAG" --repo "$SOURCE" --dir "$dir"
+          fi
+          if [[ "$INCLUDE_SOURCE" == "true" ]]; then
+            # refs/tags/<tag> avoids HTTP 300 when a branch has the same name as the tag
+            gh api "repos/$SOURCE/zipball/refs/tags/$TAG" > "$dir/source-${TAG//\//-}.zip"
+            gh api "repos/$SOURCE/tarball/refs/tags/$TAG" > "$dir/source-${TAG//\//-}.tar.gz"
+          fi
+          files=("$dir"/*)
+          if [[ ! -e "${files[0]}" ]]; then files=(); fi
+
+          notes="$RUNNER_TEMP/notes.md"
+          {
+            jq -r '.body // ""' <<<"$release"
+            echo
+            echo "---"
+            echo "Copied from $src_url"
+          } > "$notes"
+
+          create=(--repo "$TARGET" --draft --title "$title" --notes-file "$notes")
+          if [[ "$prerelease" == "true" ]]; then create+=(--prerelease); fi
+          gh release create "$TAG" "${create[@]}"
+          if (( ${#files[@]} > 0 )); then
+            gh release upload "$TAG" --repo "$TARGET" "${files[@]}"
+          fi
+          gh release edit "$TAG" --repo "$TARGET" --draft=false
+
+          echo "✅ $TAG copied to $dst_url (${#files[@]} file(s))"
+          echo "✅ \`$TAG\` copied to [$TARGET]($dst_url) with ${#files[@]} file(s)" >> "$GITHUB_STEP_SUMMARY"
